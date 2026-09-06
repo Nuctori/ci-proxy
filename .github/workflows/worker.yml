@@ -1,8 +1,8 @@
 # npc-worker —— 代码修改职能(两阶段门禁,通用版)
 #
-# 状态机:PLAN(方案评论,<!-- worker-plan --> 标记)→ ⛔授权门禁 → EXECUTE(分支+PR 交付)。
-# 门禁规则:方案评论之后,必须出现「授权人白名单」成员的授权评论(含 授权/批准/同意执行//worker-go),
-#          且交付分支不存在,才允许执行。worker 永远不直接 push 主开发分支。
+# 状态机:PLAN(方案评论,<!-- worker-plan --> 标记)→ ⛔授权门禁 → EXECUTE(直接交付 dev)。
+# 门禁规则:方案评论之后,必须出现「非 bot 的协作者」的授权评论(含 授权/批准/同意执行//worker-go)。
+#          授权即视为对方案内容的认可,worker 直接交付到开发分支;回滚用 git revert。
 #
 # 实例配置走 repo Variables: NPC_TARGET_REPO / NPC_SETUP_COMMAND / NPC_PROVIDER / NPC_MODEL /
 #                             NPC_BRANCH(dev) / NPC_AUTHORIZERS(逗号分隔,默认 Nuctori)
@@ -35,7 +35,8 @@ permissions: {}
 env:
   TARGET_REPO: ${{ github.event.client_payload.repo || vars.NPC_TARGET_REPO }}
   BRANCH_REF: ${{ github.event.client_payload.branch || vars.NPC_BRANCH || 'dev' }}
-  AUTHORIZERS: ${{ vars.NPC_AUTHORIZERS || 'Nuctori' }}
+  BOT_LOGIN: ${{ vars.NPC_BOT_LOGIN || 'zri-review-npc' }}
+  AUTHORIZERS: ${{ vars.NPC_AUTHORIZERS || '' }} # 可选收紧白名单(逗号分隔);默认=非 bot 的所有协作者
   SETUP_COMMAND: ${{ vars.NPC_SETUP_COMMAND }}
   PROVIDER: ${{ vars.NPC_PROVIDER }}
   MODEL: ${{ vars.NPC_MODEL }}
@@ -78,7 +79,7 @@ jobs:
         id: sweep
         if: steps.route.outputs.mode == 'sweep'
         env:
-          AUTHORIZERS: ${{ env.AUTHORIZERS }}
+          BOT_LOGIN: ${{ env.BOT_LOGIN }}
         run: |
           set -eu
           gh api "repos/$TARGET_REPO/issues?state=open&per_page=100" --paginate \
@@ -94,9 +95,9 @@ jobs:
             fi
             pid="$(cut -f1 <<< "$plan")"; ptime="$(cut -f2 <<< "$plan")"
             auth="$(gh api "repos/$TARGET_REPO/issues/$n/comments?per_page=100" \
-              --jq --arg ptime "$ptime" --arg auth "$AUTHORIZERS" \
-              '[.[] | select(.created_at > $ptime) | select(($auth | split(",") | index(.user.login)) != null) | select(.body | test("授权|批准|同意执行|/worker-go"))] | length' 2>/dev/null || echo 0)"
-            if [ "${auth:-0}" -gt 0 ] && ! gh api "repos/$TARGET_REPO/git/ref/heads/npc/issue-$n" >/dev/null 2>&1; then
+              --jq --arg ptime "$ptime" --arg bot "$BOT_LOGIN" \
+              '[.[] | select(.created_at > $ptime) | select(.user.login != $bot) | select(.body | test("授权|批准|同意执行|/worker-go"))] | length' 2>/dev/null || echo 0)"
+            if [ "${auth:-0}" -gt 0 ]; then
               echo "$n" >> /tmp/exec_nums.txt
             fi
           done
@@ -177,18 +178,17 @@ jobs:
           export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
           git config user.name "zri-review-npc"
           git config user.email "zri-review-npc@users.noreply.github.com"
-          git checkout -b "npc/issue-$NUM"
+          git pull --ff-only origin "$BRANCH_REF" 2>/dev/null || true
           cat > /tmp/worker-execute-prompt.md <<PROMPT
-          你是 worker 执行 agent。issue #$NUM 的方案已获制作人授权
+          你是 worker 执行 agent。issue #$NUM 的方案已获授权
           (时间线中带 <!-- worker-plan --> 标记的评论即方案,其后应有授权评论)。
-          当前分支: npc/issue-$NUM(已建好)。
+          当前分支: $BRANCH_REF(已是最新)。授权即认可方案内容,交付**直接落到本分支**。
           执行纪律:
           1. 先读方案评论与 issue 上下文;严格按方案实现,禁止任何超出方案范围的顺手改动
           2. 完成后 git add -A;若无变更,在 issue 评论说明「方案无可代码化内容」并停止
-          3. 有变更:git commit -m "fix: 按 #$NUM 方案实现(npc-worker)";git push origin HEAD
-          4. gh pr create --base dev --title "fix: #$NUM 方案交付(npc-worker)" --body 写清 改动摘要/验证方式/关联 issue
-          5. 在 issue #NUM 评论交付信息(PR 链接 + 改动摘要 + 自验结果),末尾 <!-- npc-at -->
-          全程禁止:直接 push dev、修改方案外文件、再 @zri-review-npc、删除他人内容
+          3. 有变更:git commit -m "fix: 按 #$NUM 方案实现(npc-worker)";git push origin HEAD——直接交付
+          4. 在 issue #NUM 评论交付信息(commit 链接 + 改动摘要 + 自验结果),末尾 <!-- npc-at -->
+          全程禁止:修改方案外文件、再 @zri-review-npc、删除他人内容
           PROMPT
           pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
             --tools read,bash,grep,find,ls,write,edit \
