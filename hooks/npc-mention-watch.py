@@ -23,6 +23,18 @@ CONFIG = {
     "state_file": os.environ.get(
         "STATE_FILE", os.path.expanduser("~/.cache/npc-mention-last-id.json")
     ),
+    # agent 栈配置(随 dispatch 携带;环境变量可覆盖)
+    "cfg_provider": os.environ.get("CFG_PROVIDER", "commandcode"),
+    "cfg_model": os.environ.get("CFG_MODEL", "meta/muse-spark-1.2-contributor"),
+    "cfg_setup_command": os.environ.get(
+        "CFG_SETUP",
+        'export COMMAND_CODE_API_KEY="$AGENT_API_KEY"; '
+        "npm install -g @earendil-works/pi-coding-agent@0.84.4 "
+        "pi-commandcode-provider@0.6.0 @earendil-works/pi-ai@0.84.4; "
+        "pi install npm:pi-commandcode-provider 2>&1 | tail -n 20 || true; "
+        'mkdir -p "$HOME/.pi/agent"; '
+        'cp -f .pi-commandcode-models.json "$HOME/.pi/agent/commandcode-models.json" 2>/dev/null || true',
+    ),
 }
 
 ROLE_MAP = [
@@ -57,7 +69,13 @@ def dispatch(repo, number, role, task, author):
             "repo": repo,
             "number": number,
             "role": role,
-            "cfg": {"task": task[:4000], "author": author},
+            "cfg": {
+                "task": task[:4000],
+                "author": author,
+                "provider": CONFIG["cfg_provider"],
+                "model": CONFIG["cfg_model"],
+                "setup_command": CONFIG["cfg_setup_command"],
+            },
         },
     }
     gh(f"repos/{CONFIG['npc_repo']}/dispatches", "POST", payload)
