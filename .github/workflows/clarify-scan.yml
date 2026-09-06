@@ -1,0 +1,131 @@
+# clarify-scan —— 每日人话拆解巡检(通用版)
+#
+# 职能:每天定时扫描目标仓库的开放 issue,找出「未拆解过」或「拆解后有更新」的,
+#      交给职能 agent 批量产出/更新人话版评论;没有待处理的整场秒退。
+# 判重:<!-- npc-plain --> 标记评论的 created_at 晚于 issue.updated_at → 已拆解且无更新,跳过;
+#      否则视为待处理(agent 会对已存在的标记评论做 PATCH 更新而非新发,防刷屏)。
+#
+# 实例配置(仓库 Variables,Settings → Secrets and variables → Actions → Variables):
+#   NPC_TARGET_REPO     目标仓库 owner/name(必填)
+#   NPC_SETUP_COMMAND   agent 安装命令(可选)
+#   NPC_PROVIDER/NPC_MODEL  agent provider/model(可选)
+# 注意:GitHub 会在仓库 60 天无动静后停用 schedule,偶尔 push/手动 dispatch 可保活。
+
+name: clarify-scan
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # UTC 01:00 = 北京 09:00
+  workflow_dispatch:
+    inputs:
+      max_per_run:
+        description: "单次最多处理 issue 数"
+        required: false
+        type: number
+        default: 8
+
+concurrency:
+  group: clarify-scan
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  TARGET_REPO: ${{ vars.NPC_TARGET_REPO }}
+  MAX_PER_RUN: ${{ github.event.client_payload.cfg.max_per_run || inputs.max_per_run || 8 }}
+  SETUP_COMMAND: ${{ vars.NPC_SETUP_COMMAND }}
+  PROVIDER: ${{ vars.NPC_PROVIDER }}
+  MODEL: ${{ vars.NPC_MODEL }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.NPC_PAT }}
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+    outputs:
+      count: ${{ steps.scan.outputs.count }}
+    steps:
+      - name: 扫描待拆解 issue(无则整场跳过)
+        id: scan
+        run: |
+          set -eu
+          : "${MAX_PER_RUN:=8}"
+          gh api "repos/$TARGET_REPO/issues?state=open&per_page=100" --paginate \
+            --jq '.[] | select(.pull_request == null) | [.number, .updated_at] | @tsv' \
+            > /tmp/open.tsv || true
+          : > /tmp/needs.tsv
+          while IFS="$(printf '\t')" read -r num upd; do
+            [ -n "$num" ] || continue
+            marker="$(gh api "repos/$TARGET_REPO/issues/$num/comments?per_page=100" \
+              --jq '[.[] | select(.body | contains("<!-- npc-plain -->"))] | sort_by(.created_at) | last | .created_at // empty' 2>/dev/null || true)"
+            if [ -z "$marker" ]; then
+              state="new"
+            elif [ "$upd" \> "$marker" ]; then
+              state="stale"
+            else
+              continue
+            fi
+            printf '%s\t%s\t%s\n' "$num" "$upd" "$state" >> /tmp/needs.tsv
+          done < /tmp/open.tsv
+          sort -t"$(printf '\t')" -k1,1n /tmp/needs.tsv | head -n "$MAX_PER_RUN" > /tmp/batch.tsv || : > /tmp/batch.tsv
+          count="$(grep -c . /tmp/batch.tsv || true)"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            echo "没有待拆解的 issue,跳过"
+            exit 0
+          fi
+          echo "待拆解 $count 个(上限 $MAX_PER_RUN):"
+          cat /tmp/batch.tsv
+          numbers="$(cut -f1 /tmp/batch.tsv | paste -sd, -)"
+          echo "numbers=$numbers" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.scan.outputs.count != '0'
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          token: ${{ secrets.NPC_PAT }}
+          fetch-depth: 50
+
+      - uses: actions/setup-node@v4
+        if: steps.scan.outputs.count != '0'
+        with:
+          node-version: "22"
+
+      - name: agent 安装(可插拔)
+        if: steps.scan.outputs.count != '0' && env.SETUP_COMMAND != ''
+        run: |
+          set -euo pipefail
+          eval "$SETUP_COMMAND"
+
+      - name: 批量人话拆解
+        if: steps.scan.outputs.count != '0'
+        env:
+          NUMBERS: ${{ steps.scan.outputs.numbers }}
+        run: |
+          set -euo pipefail
+          export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
+          if [ -f "docs/planner/playbooks/npc-clarify.md" ]; then
+            echo "已加载目标仓库 clarify playbook"
+          fi
+          cat > /tmp/npc-clarify-batch-prompt.md <<PROMPT
+          你是「人话拆解」批量职能 agent(角色: clarify),当前工作区即目标仓库。
+          今日待处理 issue 编号: $NUMBERS(逐个处理,不要遗漏)。
+
+          对每个编号执行:
+          1. gh api 读 issue 全文与评论;按需读仓库代码/文档求证
+          2. 查该 issue 是否已有含 <!-- npc-plain --> 标记的评论:
+             - 无 → 新发一条人话评论
+             - 有且 issue 在其后有更新 → 用 PATCH /repos/\$TARGET_REPO/issues/comments/{评论id} 更新那条评论
+             - 有且无更新 → 跳过(打印 skipped 即可)
+          3. 评论内容按 docs/planner/playbooks/npc-clarify.md 执行(先读它;五段式、
+             结论先行、黑话翻译、判断不了写「在等制作人决策」、不编造)
+          4. 评论末尾带 <!-- npc-plain -->;禁止再 @zri-review-npc;只动你自己的那条评论
+
+          每处理完一个打印一行:#编号 → created/updated/skipped
+          全部完成后打印汇总:processed=N updated=X created=Y skipped=Z
+          PROMPT
+          pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
+            --tools read,bash,grep,find,ls \
+            "$(cat /tmp/npc-clarify-batch-prompt.md)" 2>&1 | tee /tmp/clarify-scan.log
+          echo "批量拆解完成,日志见 /tmp/clarify-scan.log"
