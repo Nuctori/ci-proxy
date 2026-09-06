@@ -65,7 +65,7 @@ jobs:
           fi
           if [ "$mode" = "plan" ] && [ -n "$num" ]; then
             echo "$num" > /tmp/plan_nums.txt; echo 1 > /tmp/plan_count.txt
-            : > /tmp/exec_nums.txt;   echo 0 > /tmp/exec_count.txt
+            : > /tmp/exec_nums.txt;   echo 1 > /tmp/exec_count.txt
           elif [ "$mode" = "execute" ] && [ -n "$num" ]; then
             : > /tmp/plan_nums.txt;   echo 0 > /tmp/plan_count.txt
             echo "$num" > /tmp/exec_nums.txt; echo 1 > /tmp/exec_count.txt
@@ -74,6 +74,8 @@ jobs:
             : > /tmp/exec_nums.txt;   echo 0 > /tmp/exec_count.txt
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "numbers_plan=$(paste -sd, /tmp/plan_nums.txt 2>/dev/null)" >> "$GITHUB_OUTPUT"
+          echo "numbers_execute=$(paste -sd, /tmp/exec_nums.txt 2>/dev/null)" >> "$GITHUB_OUTPUT"
 
       - name: 巡检扫描(提案候选 + 已授权队列)
         id: sweep
