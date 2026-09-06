@@ -40,7 +40,8 @@ CONFIG = {
 ROLE_MAP = [
     (r"审|review", "review"),
     (r"分析|根因|analyze|cause", "analyze"),
-    (r"规划|拆解|plan|task", "plan"),
+    (r"人话|翻译|简化|拆解|clarify|plain", "clarify"),
+    (r"规划|plan", "plan"),
     (r"修|fix|repair", "fix"),
 ]
 
