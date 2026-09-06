@@ -102,22 +102,23 @@ concurrency:
 permissions: {}
 
 env:
+  # 平台限制: client_payload 顶层最多 10 个属性,故配置项统一收进 cfg 子对象
   TARGET_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
   TARGET_BRANCH: ${{ github.event.client_payload.branch || inputs.branch }}
   TARGET_SHA: ${{ github.event.client_payload.sha || inputs.sha }}
   HEAD_MSG: ${{ github.event.client_payload.msg || inputs.msg }}
-  DRY_RUN: ${{ github.event.client_payload.dry_run || inputs.dry_run }}
-  CURSOR_PATH: ${{ github.event.client_payload.cursor_path || inputs.cursor_path }}
-  SINCE: ${{ github.event.client_payload.since || inputs.since }}
-  CONTEXT: ${{ github.event.client_payload.context || inputs.context }}
-  THROTTLE_MINUTES: ${{ github.event.client_payload.throttle_minutes || inputs.throttle_minutes }}
-  SKIP_KEYWORD: ${{ github.event.client_payload.skip_keyword || inputs.skip_keyword }}
-  FETCH_DEPTH: ${{ github.event.client_payload.fetch_depth || inputs.fetch_depth }}
-  SETUP_COMMAND: ${{ github.event.client_payload.setup_command || inputs.setup_command }}
-  PROVIDER: ${{ github.event.client_payload.provider || inputs.provider }}
-  MODEL: ${{ github.event.client_payload.model || inputs.model }}
-  PROMPT_PATH: ${{ github.event.client_payload.prompt_path || inputs.prompt_path }}
-  REVIEW_COMMAND: ${{ github.event.client_payload.review_command || inputs.review_command }}
+  DRY_RUN: ${{ github.event.client_payload.cfg.dry_run || inputs.dry_run }}
+  CURSOR_PATH: ${{ github.event.client_payload.cfg.cursor_path || inputs.cursor_path }}
+  SINCE: ${{ github.event.client_payload.cfg.since || inputs.since }}
+  CONTEXT: ${{ github.event.client_payload.cfg.context || inputs.context }}
+  THROTTLE_MINUTES: ${{ github.event.client_payload.cfg.throttle_minutes || inputs.throttle_minutes }}
+  SKIP_KEYWORD: ${{ github.event.client_payload.cfg.skip_keyword || inputs.skip_keyword }}
+  FETCH_DEPTH: ${{ github.event.client_payload.cfg.fetch_depth || inputs.fetch_depth }}
+  SETUP_COMMAND: ${{ github.event.client_payload.cfg.setup_command || inputs.setup_command }}
+  PROVIDER: ${{ github.event.client_payload.cfg.provider || inputs.provider }}
+  MODEL: ${{ github.event.client_payload.cfg.model || inputs.model }}
+  PROMPT_PATH: ${{ github.event.client_payload.cfg.prompt_path || inputs.prompt_path }}
+  REVIEW_COMMAND: ${{ github.event.client_payload.cfg.review_command || inputs.review_command }}
 
 jobs:
   review:

@@ -41,22 +41,25 @@
 
 ## 输入(dispatch 负载 `client_payload` 与 workflow_dispatch 输入同名同义)
 
+> **平台限制**: `client_payload` 顶层最多 10 个属性。dispatch 时动态四键放顶层
+> (`repo`/`branch`/`sha`/`msg`),其余配置统一收进 `client_payload.cfg` 子对象。
+
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `repo` / `branch` | 必填 | 目标仓库与分支 |
 | `sha` | 空 | 回写 commit status 用 |
 | `msg` | 空 | head commit message,参与跳过关键词过滤 |
-| `dry_run` | `false` | 干跑,只走管道不跑 agent |
-| `cursor_path` | 空(禁用) | 游标文件路径;`.json` 后缀写 JSON,否则写 `lastReviewedAt=...` 行 |
-| `since` | `3 hours ago` | 审码窗口 |
-| `context` | `npc-review` | commit status context |
-| `throttle_minutes` | `180` | 基于游标的限流(0 禁用) |
-| `skip_keyword` | `[auto-fix]` | 提交信息命中则秒退 |
-| `fetch_depth` | `200` | 目标仓库浅克隆深度(浅克隆不裁剪工作区,只裁历史) |
-| `setup_command` | 空 | agent 安装命令,例:`npm install -g @earendil-works/pi-coding-agent@x.y.z` |
-| `provider` / `model` | 空 | `pi` 的 provider/model;非干跑二者与 `review_command` 至少有一组 |
-| `prompt_path` | 空 | 目标仓库内的提示词文件;空则用内置通用提示词 |
-| `review_command` | 空 | 自定义审码命令(cwd=目标仓库根,优先级最高) |
+| `cfg.dry_run` | `false` | 干跑,只走管道不跑 agent |
+| `cfg.cursor_path` | 空(禁用) | 游标文件路径;`.json` 后缀写 JSON,否则写 `lastReviewedAt=...` 行 |
+| `cfg.since` | `3 hours ago` | 审码窗口 |
+| `cfg.context` | `npc-review` | commit status context |
+| `cfg.throttle_minutes` | `180` | 基于游标的限流(0 禁用) |
+| `cfg.skip_keyword` | `[auto-fix]` | 提交信息命中则秒退 |
+| `cfg.fetch_depth` | `200` | 目标仓库浅克隆深度(浅克隆不裁剪工作区,只裁历史) |
+| `cfg.setup_command` | 空 | agent 安装命令,例:`npm install -g @earendil-works/pi-coding-agent@x.y.z` |
+| `cfg.provider` / `cfg.model` | 空 | `pi` 的 provider/model;非干跑二者与 `review_command` 至少有一组 |
+| `cfg.prompt_path` | 空 | 目标仓库内的提示词文件;空则用内置通用提示词 |
+| `cfg.review_command` | 空 | 自定义审码命令(cwd=目标仓库根,优先级最高) |
 
 ## 触发方式(三选一或组合)
 
