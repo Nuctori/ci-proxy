@@ -80,6 +80,20 @@
 - **为什么不用 reusable workflow?** 跨仓 reusable workflow 的分钟仍记在调用方,起不到"换额度池"的作用;dispatch 模式才真正把 runner 换到代理账号。
 - **游标限流的原理?** 游标文件存在目标仓库里,记录上次审码时间;guard 用 API 免检出读取,超窗才放行。
 
+## @唤起职能角色(npc-at)
+
+在目标仓库的 issue 评论里 `@你的bot + 职能词`,即可唤起对应职能 agent 回帖干活:
+
+```text
+@zri-review-npc 分析 这个崩溃的根因是什么   → role=analyze
+@zri-review-npc 规划 拆解一下这个需求       → role=plan
+@zri-review-npc 修 掉这个问题               → role=fix(需自备修复职能 playbook)
+```
+
+- 触发:`hooks/npc-mention-watch.py` 本机守望者(轮询提及,零云账号)或 webhook 中继(转发 `npc-at` 事件);
+- 职能扩展 = 在目标仓库放 `docs/planner/playbooks/npc-{role}.md` 提示词文件,无需改工作流;未命中走内置通用提示词;
+- 防回环:agent 回帖带 `<!-- npc-at -->` 标记且禁止再 @bot,守望者自动跳过自己的回帖。
+
 ## License
 
 [MIT](LICENSE)

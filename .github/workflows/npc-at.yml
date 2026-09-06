@@ -1,0 +1,107 @@
+# npc-at —— @唤起职能角色(通用版)
+#
+# 职能:收到 npc-at dispatch 后,拉取目标仓库指定 issue 的全文与评论,
+#      按 role 选择职能提示词唤起 agent 干活,产出以 issue 评论回帖。
+# 与 reviewer.yml 的分工:reviewer = push 驱动的批量审码;npc-at = 人 @ 驱动的单点职能响应。
+# 职能提示词解析顺序: cfg.prompt_path > 目标仓库 docs/planner/playbooks/npc-{role}.md > 内置通用提示词。
+# 新增职能 = 在目标仓库放一个 npc-{role}.md,无需改工作流。
+#
+# secrets: NPC_PAT(Contents:RW + Issues:RW)、AGENT_API_KEY(可缺省,内置提示词不耗 LLM 时不需要)
+
+name: npc-at
+
+on:
+  repository_dispatch:
+    types: [npc-at]
+
+concurrency:
+  group: npc-at-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.number }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  TARGET_REPO: ${{ github.event.client_payload.repo }}
+  NUMBER: ${{ github.event.client_payload.number }}
+  ROLE: ${{ github.event.client_payload.role }}
+  TASK: ${{ github.event.client_payload.cfg.task }}
+  PROMPT_PATH: ${{ github.event.client_payload.cfg.prompt_path }}
+  FETCH_DEPTH: ${{ github.event.client_payload.cfg.fetch_depth }}
+  SETUP_COMMAND: ${{ github.event.client_payload.cfg.setup_command }}
+  PROVIDER: ${{ github.event.client_payload.cfg.provider }}
+  MODEL: ${{ github.event.client_payload.cfg.model }}
+
+jobs:
+  at:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.NPC_PAT }}
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+    steps:
+      - name: 拉取 issue 上下文
+        run: |
+          set -eu
+          : "${ROLE:=assistant}"
+          : "${FETCH_DEPTH:=100}"
+          {
+            echo "## Issue #$NUMBER（$TARGET_REPO）"
+            gh api "repos/$TARGET_REPO/issues/$NUMBER" \
+              --jq '"### 标题: " + .title, "### 作者: @" + .user.login, "### 正文:", .body'
+            echo ""
+            echo "## 评论时间线"
+            gh api "repos/$TARGET_REPO/issues/$NUMBER/comments?per_page=50" \
+              --jq '.[] | "### @" + .user.login + ":", .body, ""'
+          } > /tmp/thread.md
+          echo "上下文 $(wc -l < /tmp/thread.md) 行"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ github.event.client_payload.branch }}
+          token: ${{ secrets.NPC_PAT }}
+          fetch-depth: 100
+
+      - uses: actions/setup-node@v4
+        if: env.SETUP_COMMAND != ''
+        with:
+          node-version: "22"
+
+      - name: agent 安装(可插拔)
+        if: env.SETUP_COMMAND != ''
+        run: |
+          set -euo pipefail
+          eval "$SETUP_COMMAND"
+
+      - name: 职能执行
+        run: |
+          set -euo pipefail
+          if [ -n "$PROMPT_PATH" ] && [ -f "$PROMPT_PATH" ]; then
+            PROMPT_FILE="$PROMPT_PATH"
+          elif [ -f "docs/planner/playbooks/npc-$ROLE.md" ]; then
+            PROMPT_FILE="docs/planner/playbooks/npc-$ROLE.md"
+          else
+            PROMPT_FILE="/tmp/npc-at-default-prompt.md"
+            cat > "$PROMPT_FILE" <<'PROMPT'
+          你是被 @zri-review-npc 唤醒的职能 agent（角色: $ROLE）。当前工作区即目标仓库。
+          阅读附件 issue 全文与评论时间线，结合仓库代码上下文（read/grep/bash 均可用，只读优先）。
+          任务: 完成 issue 中对你的请求（$TASK）。
+          输出纪律:
+          - 直接以一条 issue 评论回复: gh issue comment $NUMBER --repo "$TARGET_REPO" --body "..."
+          - 评论末尾追加一行签名标记 <!-- npc-at -->
+          - 全程禁止再 @zri-review-npc（防回环）
+          - 不修改仓库文件、不开 PR、除你的回复评论外不发任何评论
+          PROMPT
+          fi
+          export THREAD_FILE=/tmp/thread.md
+          export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
+          pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
+            --tools read,bash,grep,find,ls \
+            "$(cat "$PROMPT_FILE")" 2>&1 | tee /tmp/npc-at.log
+          echo "职能 agent 已完成,日志见 /tmp/npc-at.log"
+
+      - name: 收尾状态确认
+        if: always()
+        run: |
+          gh api "repos/$TARGET_REPO/issues/$NUMBER/comments?per_page=5" \
+            --jq '.[-3:][] | select(.body | contains("<!-- npc-at -->")) | "npc 回帖: " + (.created_at | tostring)' \
+            || echo "未见 npc 回帖"
