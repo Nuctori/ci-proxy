@@ -130,7 +130,8 @@ jobs:
         if: env.TARGET_SHA != ''
         run: |
           gh api "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
-            -f state=pending -f context="$CONTEXT" -f description="review 进行中" >/dev/null
+            -f state=pending -f context="$CONTEXT" -f description="review 进行中" >/dev/null \
+            || echo "::warning::SHA 不可达(未推送或无权限),跳过 status 回写,审码继续"
 
       - name: 限流与跳过过滤(API 读游标,免检出)
         id: guard
@@ -294,4 +295,5 @@ jobs:
             st=failure; desc="review 失败"
           fi
           gh api "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
-            -f state="$st" -f context="$CONTEXT" -f description="$desc" >/dev/null
+            -f state="$st" -f context="$CONTEXT" -f description="$desc" >/dev/null \
+            || echo "::warning::SHA 不可达,跳过 status 回写"
