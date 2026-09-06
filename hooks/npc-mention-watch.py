@@ -15,6 +15,7 @@ import time
 
 CONFIG = {
     "watch_repo": os.environ.get("WATCH_REPO", "Zero-Research-Institute/Touhou-Koi-Mystery"),
+    "watch_branch": os.environ.get("WATCH_BRANCH", "dev"),
     "npc_repo": os.environ.get("NPC_REPO", "zri-review-npc/ci-proxy"),
     "bot": os.environ.get("BOT_USERNAME", "zri-review-npc"),
     "event_type": os.environ.get("NPC_EVENT_TYPE", "npc-at"),
@@ -68,6 +69,7 @@ def dispatch(repo, number, role, task, author):
         "event_type": CONFIG["event_type"],
         "client_payload": {
             "repo": repo,
+            "branch": CONFIG["watch_branch"],
             "number": number,
             "role": role,
             "cfg": {
