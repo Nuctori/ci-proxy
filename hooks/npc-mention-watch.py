@@ -44,7 +44,13 @@ ROLE_MAP = [
     (r"人话|翻译|简化|拆解|clarify|plain", "clarify"),
     (r"规划|plan", "plan"),
     (r"修|fix|repair", "fix"),
+    (r"方案|出方案|worker|实现", "worker"),
 ]
+
+
+def event_for(role):
+    # worker 职能走独立事件(两阶段门禁工作流);其余走通用 npc-at
+    return "worker-plan" if role == "worker" else CONFIG["event_type"]
 
 
 def gh(endpoint, method="GET", payload=None):
@@ -66,7 +72,7 @@ def gh(endpoint, method="GET", payload=None):
 
 def dispatch(repo, number, role, task, author):
     payload = {
-        "event_type": CONFIG["event_type"],
+        "event_type": event_for(role),
         "client_payload": {
             "repo": repo,
             "branch": CONFIG["watch_branch"],

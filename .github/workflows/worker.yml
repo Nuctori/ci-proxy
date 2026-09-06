@@ -1,0 +1,196 @@
+# npc-worker —— 代码修改职能(两阶段门禁,通用版)
+#
+# 状态机:PLAN(方案评论,<!-- worker-plan --> 标记)→ ⛔授权门禁 → EXECUTE(分支+PR 交付)。
+# 门禁规则:方案评论之后,必须出现「授权人白名单」成员的授权评论(含 授权/批准/同意执行//worker-go),
+#          且交付分支不存在,才允许执行。worker 永远不直接 push 主开发分支。
+#
+# 实例配置走 repo Variables: NPC_TARGET_REPO / NPC_SETUP_COMMAND / NPC_PROVIDER / NPC_MODEL /
+#                             NPC_BRANCH(dev) / NPC_AUTHORIZERS(逗号分隔,默认 Nuctori)
+
+name: npc-worker
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # UTC 02:00 = 北京 10:00(每日巡检:提案 + 执行已授权)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "sweep=巡检 | plan=仅出方案 | execute=仅执行已授权"
+        required: false
+        default: "sweep"
+        type: string
+      number:
+        description: "plan/execute 模式的 issue 编号"
+        required: false
+        type: string
+  repository_dispatch:
+    types: [worker-plan, worker-execute]
+
+concurrency:
+  group: npc-worker
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  TARGET_REPO: ${{ github.event.client_payload.repo || vars.NPC_TARGET_REPO }}
+  BRANCH_REF: ${{ github.event.client_payload.branch || vars.NPC_BRANCH || 'dev' }}
+  AUTHORIZERS: ${{ vars.NPC_AUTHORIZERS || 'Nuctori' }}
+  SETUP_COMMAND: ${{ vars.NPC_SETUP_COMMAND }}
+  PROVIDER: ${{ vars.NPC_PROVIDER }}
+  MODEL: ${{ vars.NPC_MODEL }}
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.NPC_PAT }}
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+    outputs:
+      mode: ${{ steps.route.outputs.mode }}
+      numbers_plan: ${{ steps.route.outputs.numbers_plan }}
+      numbers_execute: ${{ steps.route.outputs.numbers_execute }}
+    steps:
+      - name: 路由(计划/执行两队列)
+        id: route
+        run: |
+          set -eu
+          event="${{ github.event_name }}"
+          mode="${{ github.event.inputs.mode || 'sweep' }}"
+          num="${{ github.event.inputs.number || github.event.client_payload.number || '' }}"
+          # 点名事件:单 issue 直通对应队列
+          if [ "$event" = "repository_dispatch" ]; then
+            if [ "${{ github.event.action }}" = "worker-execute" ]; then mode="execute"; else mode="plan"; fi
+          fi
+          if [ "$mode" = "plan" ] && [ -n "$num" ]; then
+            echo "$num" > /tmp/plan_nums.txt; echo 1 > /tmp/plan_count.txt
+            : > /tmp/exec_nums.txt;   echo 0 > /tmp/exec_count.txt
+          elif [ "$mode" = "execute" ] && [ -n "$num" ]; then
+            : > /tmp/plan_nums.txt;   echo 0 > /tmp/plan_count.txt
+            echo "$num" > /tmp/exec_nums.txt; echo 1 > /tmp/exec_count.txt
+          else
+            : > /tmp/plan_nums.txt;   echo 0 > /tmp/plan_count.txt
+            : > /tmp/exec_nums.txt;   echo 0 > /tmp/exec_count.txt
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: 巡检扫描(提案候选 + 已授权队列)
+        id: sweep
+        if: steps.route.outputs.mode == 'sweep'
+        env:
+          AUTHORIZERS: ${{ env.AUTHORIZERS }}
+        run: |
+          set -eu
+          gh api "repos/$TARGET_REPO/issues?state=open&per_page=100" --paginate \
+            --jq '.[] | select(.pull_request == null) | .number' > /tmp/open_nums.txt
+          : > /tmp/plan_nums.txt;   : > /tmp/exec_nums.txt
+          echo 0 > /tmp/plan_count.txt; echo 0 > /tmp/exec_count.txt
+          for n in $(cat /tmp/open_nums.txt); do
+            plan="$(gh api "repos/$TARGET_REPO/issues/$n/comments?per_page=100" \
+              --jq '[.[] | select(.body | contains("<!-- worker-plan -->"))] | sort_by(.created_at) | last | select(. != null) | [.id, .created_at] | @tsv' 2>/dev/null || true)"
+            if [ -z "$plan" ]; then
+              echo "$n" >> /tmp/plan_candidates.txt
+              continue
+            fi
+            pid="$(cut -f1 <<< "$plan")"; ptime="$(cut -f2 <<< "$plan")"
+            auth="$(gh api "repos/$TARGET_REPO/issues/$n/comments?per_page=100" \
+              --jq --arg ptime "$ptime" --arg auth "$AUTHORIZERS" \
+              '[.[] | select(.created_at > $ptime) | select(($auth | split(",") | index(.user.login)) != null) | select(.body | test("授权|批准|同意执行|/worker-go"))] | length' 2>/dev/null || echo 0)"
+            if [ "${auth:-0}" -gt 0 ] && ! gh api "repos/$TARGET_REPO/git/ref/heads/npc/issue-$n" >/dev/null 2>&1; then
+              echo "$n" >> /tmp/exec_nums.txt
+            fi
+          done
+          exec_count="$(grep -c . /tmp/exec_nums.txt 2>/dev/null || echo 0)"
+          prop_cap=6
+          if [ "$exec_count" -gt 0 ]; then
+            # 本场有执行任务时不再新增提案(专注交付)
+            : > /tmp/plan_nums.txt
+          else
+            head -n "$prop_cap" /tmp/plan_candidates.txt > /tmp/plan_nums.txt 2>/dev/null || : > /tmp/plan_nums.txt
+          fi
+          echo "plan_count=$(grep -c . /tmp/plan_nums.txt 2>/dev/null || echo 0)" >> "$GITHUB_OUTPUT"
+          echo "execute_count=$exec_count" >> "$GITHUB_OUTPUT"
+          echo "执行队列: $(cat /tmp/exec_nums.txt | tr '\n' ' ')"
+          echo "提案队列: $(cat /tmp/plan_nums.txt | tr '\n' ' ')"
+
+      - uses: actions/checkout@v4
+        if: steps.route.outputs.mode != 'sweep' || steps.sweep.outputs.execute_count == '0'
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BRANCH_REF }}
+          token: ${{ secrets.NPC_PAT }}
+          fetch-depth: 100
+
+      - uses: actions/setup-node@v4
+        if: steps.route.outputs.mode != 'sweep' || steps.sweep.outputs.execute_count == '0'
+        with:
+          node-version: "22"
+
+      - name: agent 安装(可插拔)
+        if: steps.route.outputs.mode != 'sweep' || steps.sweep.outputs.execute_count == '0'
+        run: |
+          set -euo pipefail
+          eval "$SETUP_COMMAND"
+
+      - name: PLAN 阶段(出方案,零代码修改)
+        if: steps.route.outputs.mode != 'sweep' || steps.sweep.outputs.execute_count == '0'
+        env:
+          PLAN_COUNT: ${{ steps.route.outputs.mode == 'sweep' && steps.sweep.outputs.plan_count || steps.route.outputs.numbers_plan }}
+        run: |
+          set -euo pipefail
+          [ "$PLAN_COUNT" -gt 0 ] 2>/dev/null || { echo "无提案任务"; exit 0; }
+          export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
+          cat > /tmp/worker-plan-prompt.md <<PROMPT
+          你是 worker 职能 agent(代码修改「规划」阶段,角色: worker),当前工作区即目标仓库。
+          待评估候选 issue: $(cat /tmp/plan_nums.txt | tr '\n' ' ');本场上限: 最多为 $PLAN_COUNT 个 issue 出方案。
+          逐个评估:读 issue 全文/评论 + 仓库上下文,判断是否「明确可做且已对齐」(根因清晰、方案空间小、
+          无未决争议)。不确定的直接放弃——宁缺勿滥。
+          对选中者,在对应 issue 发一条「方案评论」:
+          1. 目标(改什么,一句话)
+          2. 方案(改动点列表:文件:位置 → 做什么,具体到可直接执行)
+          3. 验证方式(交付后如何自证)
+          4. 风险与影响面
+          5. 授权说明:原话写「制作人回复『授权执行』即开工;交付形式为 npc/issue-N 分支 + PR,不直接触碰 dev」
+          末尾签名: <!-- npc-at --><!-- worker-plan -->
+          纪律: 方案阶段零代码修改;开放问题列「开放问题」一节;超出 issue 范围的顺手改动明确排除;
+          每个选中 issue 只发这一条评论;禁止再 @zri-review-npc。
+          PROMPT
+          pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
+            --tools read,bash,grep,find,ls \
+            "$(cat /tmp/worker-plan-prompt.md)" 2>&1 | tee /tmp/worker-plan.log
+          echo "方案阶段完成"
+
+      - name: EXECUTE 阶段(已授权 → 分支 + PR 交付)
+        if: steps.route.outputs.mode == 'execute' || steps.route.outputs.mode == 'sweep'
+        env:
+          EXEC_COUNT: ${{ steps.route.outputs.mode == 'sweep' && steps.sweep.outputs.execute_count || '1' }}
+          EXEC_NUMS: ${{ steps.route.outputs.numbers_execute }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.route.outputs.mode }}" = "sweep" ]; then
+            [ "$EXEC_COUNT" -gt 0 ] 2>/dev/null || { echo "无已授权任务"; exit 0; }
+            NUM="$(head -n 1 /tmp/exec_nums.txt)"
+          else
+            NUM="$(head -n 1 /tmp/exec_nums.txt)"
+          fi
+          echo "执行 issue #$NUM"
+          export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
+          git config user.name "zri-review-npc"
+          git config user.email "zri-review-npc@users.noreply.github.com"
+          git checkout -b "npc/issue-$NUM"
+          cat > /tmp/worker-execute-prompt.md <<PROMPT
+          你是 worker 执行 agent。issue #$NUM 的方案已获制作人授权
+          (时间线中带 <!-- worker-plan --> 标记的评论即方案,其后应有授权评论)。
+          当前分支: npc/issue-$NUM(已建好)。
+          执行纪律:
+          1. 先读方案评论与 issue 上下文;严格按方案实现,禁止任何超出方案范围的顺手改动
+          2. 完成后 git add -A;若无变更,在 issue 评论说明「方案无可代码化内容」并停止
+          3. 有变更:git commit -m "fix: 按 #$NUM 方案实现(npc-worker)";git push origin HEAD
+          4. gh pr create --base dev --title "fix: #$NUM 方案交付(npc-worker)" --body 写清 改动摘要/验证方式/关联 issue
+          5. 在 issue #NUM 评论交付信息(PR 链接 + 改动摘要 + 自验结果),末尾 <!-- npc-at -->
+          全程禁止:直接 push dev、修改方案外文件、再 @zri-review-npc、删除他人内容
+          PROMPT
+          pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
+            --tools read,bash,grep,find,ls,write,edit \
+            "$(cat /tmp/worker-execute-prompt.md)" 2>&1 | tee /tmp/worker-execute.log
+          echo "执行阶段完成"
