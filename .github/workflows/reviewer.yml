@@ -1,0 +1,291 @@
+# npc-review —— 跨仓库 CI 代理(通用版)
+#
+# 职能:接收 repository_dispatch / workflow_dispatch,检出目标(可为私有)仓库,
+#      按窗口批量审码(agent 可插拔),回写 issue、游标文件与 commit status。
+# 定位:本文件即组件本体,复制到任意代理仓库即可用;目标仓库专属的
+#      提示词/模型/安装命令通过 dispatch 负载或 workflow_dispatch 输入注入。
+#
+# secrets 依赖:
+#   NPC_PAT —— 细粒度 PAT,对目标仓库需 Contents: RW、Issues: RW、Commit statuses: RW
+# 干跑模式:dry_run=true 时跳过 agent,仅验证 管道四段(调度/检出/游标回写/status)。
+
+name: npc-review
+
+on:
+  repository_dispatch:
+    types: [npc-review, commit-review]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "目标仓库 owner/name"
+        required: true
+        type: string
+      branch:
+        description: "目标分支"
+        required: true
+        type: string
+      sha:
+        description: "触发 commit SHA(status 回写用,可空)"
+        required: false
+        type: string
+        default: ""
+      msg:
+        description: "head commit message(跳过关键词过滤)"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "干跑:跳过 agent,仅验证管道"
+        required: false
+        type: boolean
+        default: false
+      cursor_path:
+        description: "游标文件路径(相对目标仓库,空=禁用限流与回写)"
+        required: false
+        type: string
+        default: ""
+      since:
+        description: "审码窗口(git --since 语法)"
+        required: false
+        type: string
+        default: "3 hours ago"
+      context:
+        description: "commit status context"
+        required: false
+        type: string
+        default: "npc-review"
+      throttle_minutes:
+        description: "限流分钟数(0=禁用)"
+        required: false
+        type: number
+        default: 180
+      skip_keyword:
+        description: "提交信息含此关键词则跳过"
+        required: false
+        type: string
+        default: "[auto-fix]"
+      fetch_depth:
+        description: "目标仓库检出深度"
+        required: false
+        type: number
+        default: 200
+      setup_command:
+        description: "agent 安装命令(空=跳过安装)"
+        required: false
+        type: string
+        default: ""
+      provider:
+        description: "agent provider(pi 语法,空=须提供 review_command)"
+        required: false
+        type: string
+        default: ""
+      model:
+        description: "agent 模型名"
+        required: false
+        type: string
+        default: ""
+      prompt_path:
+        description: "目标仓库内的提示词文件(空=内置通用提示词)"
+        required: false
+        type: string
+        default: ""
+      review_command:
+        description: "自定义审码命令(优先级最高;cwd=目标仓库根)"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: npc-review-${{ github.event.client_payload.repo || inputs.repo }}-${{ github.event.client_payload.branch || inputs.branch }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  TARGET_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
+  TARGET_BRANCH: ${{ github.event.client_payload.branch || inputs.branch }}
+  TARGET_SHA: ${{ github.event.client_payload.sha || inputs.sha }}
+  HEAD_MSG: ${{ github.event.client_payload.msg || inputs.msg }}
+  DRY_RUN: ${{ github.event.client_payload.dry_run || inputs.dry_run }}
+  CURSOR_PATH: ${{ github.event.client_payload.cursor_path || inputs.cursor_path }}
+  SINCE: ${{ github.event.client_payload.since || inputs.since }}
+  CONTEXT: ${{ github.event.client_payload.context || inputs.context }}
+  THROTTLE_MINUTES: ${{ github.event.client_payload.throttle_minutes || inputs.throttle_minutes }}
+  SKIP_KEYWORD: ${{ github.event.client_payload.skip_keyword || inputs.skip_keyword }}
+  FETCH_DEPTH: ${{ github.event.client_payload.fetch_depth || inputs.fetch_depth }}
+  SETUP_COMMAND: ${{ github.event.client_payload.setup_command || inputs.setup_command }}
+  PROVIDER: ${{ github.event.client_payload.provider || inputs.provider }}
+  MODEL: ${{ github.event.client_payload.model || inputs.model }}
+  PROMPT_PATH: ${{ github.event.client_payload.prompt_path || inputs.prompt_path }}
+  REVIEW_COMMAND: ${{ github.event.client_payload.review_command || inputs.review_command }}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.NPC_PAT }}
+    steps:
+      - name: 回写 status:pending
+        if: env.TARGET_SHA != ''
+        run: |
+          gh api "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
+            -f state=pending -f context="$CONTEXT" -f description="review 进行中" >/dev/null
+
+      - name: 限流与跳过过滤(API 读游标,免检出)
+        id: guard
+        run: |
+          set -eu
+          : "${SINCE:=3 hours ago}"
+          : "${CONTEXT:=npc-review}"
+          : "${THROTTLE_MINUTES:=180}"
+          : "${SKIP_KEYWORD:=[auto-fix]}"
+          : "${FETCH_DEPTH:=200}"
+          DRY_RUN="$(echo "$DRY_RUN" | tr '[:upper:]' '[:lower:]')"
+          export SINCE CONTEXT DRY_RUN
+
+          if [ -n "$CURSOR_PATH" ] && [ "$THROTTLE_MINUTES" -gt 0 ] 2>/dev/null; then
+            gh api "repos/$TARGET_REPO/contents/$CURSOR_PATH?ref=$TARGET_BRANCH" \
+              --jq '.content' 2>/dev/null | base64 -d > /tmp/cursor || : > /tmp/cursor
+            last="$(jq -r '.lastReviewedAt // empty' /tmp/cursor 2>/dev/null \
+              || grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z' /tmp/cursor 2>/dev/null | tail -n 1 || true)"
+            if [ -n "$last" ]; then
+              lastSec="$(date -u -d "$last" +%s 2>/dev/null || echo 0)"
+              gap=$(( $(date -u +%s) - lastSec ))
+              if [ "$gap" -lt $(( THROTTLE_MINUTES * 60 )) ]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "距上次审码 ${gap}s,限流 ${THROTTLE_MINUTES}min 内,秒退"
+                exit 0
+              fi
+            fi
+          fi
+          if [ -n "$SKIP_KEYWORD" ] && grep -qF "$SKIP_KEYWORD" <<< "$HEAD_MSG" 2>/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "命中跳过关键词 $SKIP_KEYWORD,秒退"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "放行:since=$SINCE dry_run=$DRY_RUN"
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.NPC_PAT }}
+          fetch-depth: 200
+
+      - name: 干跑(仅写游标,验证管道)
+        if: steps.guard.outputs.skip != 'true' && env.DRY_RUN == 'true'
+        run: |
+          set -eu
+          if [ -n "$CURSOR_PATH" ]; then
+            mkdir -p "$(dirname "$CURSOR_PATH")"
+            if [ "${CURSOR_PATH##*.}" = "json" ]; then
+              printf '{"lastReviewedAt":"%s","mode":"dry-run","sha":"%s"}\n' \
+                "$(date -u +%FT%TZ)" "$(git rev-parse --short HEAD)" > "$CURSOR_PATH"
+            else
+              printf 'lastReviewedAt=%s\nmode=dry-run\nsha=%s\n' \
+                "$(date -u +%FT%TZ)" "$(git rev-parse --short HEAD)" > "$CURSOR_PATH"
+            fi
+          fi
+          echo "干跑完成:调度/检出/游标/status 管道已激活(agent 未执行)"
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        with:
+          node-version: "22"
+
+      - name: agent 安装(可插拔)
+        if: steps.guard.outputs.skip != 'true' && env.DRY_RUN != 'true' && env.SETUP_COMMAND != ''
+        run: |
+          set -euo pipefail
+          eval "$SETUP_COMMAND"
+
+      - name: 审码执行
+        if: steps.guard.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          log="$(git log --since="$SINCE" --oneline 2>/dev/null | head -n 50)"
+          if [ -z "$log" ]; then
+            echo "窗口内无提交,秒退"
+            exit 0
+          fi
+          echo "批量审:$SINCE"
+          echo "$log"
+
+          if [ -n "$REVIEW_COMMAND" ]; then
+            eval "$REVIEW_COMMAND"
+            exit 0
+          fi
+          if [ -z "$PROVIDER" ] || [ -z "$MODEL" ]; then
+            echo "::error::非干跑必须提供 review_command,或 provider+model(配合 setup_command)"
+            exit 1
+          fi
+
+          if [ -n "$PROMPT_PATH" ] && [ -f "$PROMPT_PATH" ]; then
+            PROMPT_FILE="$PROMPT_PATH"
+          else
+            PROMPT_FILE="/tmp/npc-review-default-prompt.md"
+            cat > "$PROMPT_FILE" <<'PROMPT'
+          你是 commit 批量审码 agent,运行于 ci-proxy 代理仓库,审的是当前工作区(目标仓库)。
+          输入为过去一段窗口的批量提交,非单 commit,不开 PR。
+
+          任务(批量,有问题才产出):
+          - 用 git log --since 与 git show 审视窗口内改动,结合工作区任意文件上下文
+          - 关注:错误逻辑、空指针/越界、资源泄漏、并发、序列化、业务回归
+          - 轻微风格不单独开 issue
+          - 去重:若已有同根因 open issue(gh issue list --state open),追加评论而非新开
+          - 无问题则零产出,不写任何文件(游标除外)
+
+          有问题则开 issue(每根因 1 个):
+          - 标题前缀 [npc-review] 一句话根因
+          - 正文含:批量范围、触发提交、文件:行号、复现路径、影响面、建议修复
+
+          若环境变量 CURSOR_PATH 非空:更新该文件记录 lastReviewedAt(当前 UTC ISO 时间)。
+          json 后缀写 {"lastReviewedAt":"..."},否则写 lastReviewedAt=... 行。
+          结束输出一行:reviewed=批量条数 issues_created=N issues_commented=M range=$SINCE
+          PROMPT
+          fi
+
+          pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
+            --tools read,bash,grep,find,ls,write,edit \
+            "$(cat "$PROMPT_FILE")" 2>&1 | tee /tmp/npc-review.log
+          echo "agent 已完成,日志见 /tmp/npc-review.log"
+
+      - name: 推回游标(有变更时)
+        if: steps.guard.outputs.skip != 'true' && env.CURSOR_PATH != ''
+        run: |
+          f="$CURSOR_PATH"
+          if [ -n "$(git status --porcelain "$f" 2>/dev/null)" ]; then
+            git config user.name "npc-review[bot]"
+            git config user.email "npc-review[bot]@users.noreply.github.com"
+            git add "$f"
+            sha="$(git rev-parse --short HEAD)"
+            git commit -m "chore: npc-review cursor $sha" || true
+            if ! git pull --rebase -X ours origin "$TARGET_BRANCH" 2>/dev/null; then
+              echo "::warning::pull --rebase 失败,回退挽救"
+              git rebase --abort 2>/dev/null || true
+              git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+              git cherry-pick --no-commit "$sha" 2>/dev/null || true
+              git add "$f" 2>/dev/null || true
+              git commit -m "chore: npc-review cursor $sha (recover)" 2>/dev/null || true
+            fi
+            if git push origin "HEAD:$TARGET_BRANCH" 2>&1; then
+              echo "游标推送成功"
+            else
+              echo "::warning::游标 push 失败,state 可能滞后(不拖垮 review)"
+            fi
+          else
+            echo "游标无变更"
+          fi
+
+      - name: 回写 status:终态
+        if: always() && env.TARGET_SHA != ''
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            st=success; desc="review 完成"
+          else
+            st=failure; desc="review 失败"
+          fi
+          gh api "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
+            -f state="$st" -f context="$CONTEXT" -f description="$desc" >/dev/null
