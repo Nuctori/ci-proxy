@@ -27,7 +27,7 @@
    | Secret | 说明 |
    |---|---|
    | `NPC_PAT` | 细粒度 PAT:限定**目标仓库**,`Contents: RW + Issues: RW + Commit statuses: RW` |
-   | agent 所需 key(如 LLM API key) | 按 `setup_command` 依赖自定 |
+   | `AGENT_API_KEY` | agent 所需 API key(以 `$AGENT_API_KEY` 暴露给 `setup_command`/审码环境;pi-commandcode 约定会自动映射为 `COMMAND_CODE_API_KEY`) |
 3. **触发**:
    ```bash
    gh api -X POST repos/<代理仓库>/dispatches \

@@ -197,12 +197,16 @@ jobs:
 
       - name: agent 安装(可插拔)
         if: steps.guard.outputs.skip != 'true' && env.DRY_RUN != 'true' && env.SETUP_COMMAND != ''
+        env:
+          AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
         run: |
           set -euo pipefail
           eval "$SETUP_COMMAND"
 
       - name: 审码执行
         if: steps.guard.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        env:
+          AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
         run: |
           set -euo pipefail
           log="$(git log --since="$SINCE" --oneline 2>/dev/null | head -n 50)"
@@ -247,6 +251,7 @@ jobs:
           PROMPT
           fi
 
+          export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
           pi -p --provider "$PROVIDER" --model "$MODEL" --thinking high \
             --tools read,bash,grep,find,ls,write,edit \
             "$(cat "$PROMPT_FILE")" 2>&1 | tee /tmp/npc-review.log
