@@ -40,7 +40,7 @@ env:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ secrets.NPC_PAT }}
       AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
