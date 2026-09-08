@@ -34,6 +34,7 @@ env:
 jobs:
   at:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.NPC_PAT }}
       AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
@@ -105,3 +106,19 @@ jobs:
           gh api "repos/$TARGET_REPO/issues/$NUMBER/comments?per_page=5" \
             --jq '.[-3:][] | select(.body | contains("<!-- npc-at -->")) | "npc 回帖: " + (.created_at | tostring)' \
             || echo "未见 npc 回帖"
+
+      - name: 失败告警(开/追评 issue)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.NPC_PAT }}
+        run: |
+          title="🚨 NPC 运行失败: ${{ github.workflow }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          stamp="$(date -u +%FT%TZ)"
+          existing_num="$(gh issue list -R "${{ github.repository }}" --state open --search "🚨 NPC 运行失败 in:title" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          body="${run_url} 于 ${stamp} 失败,请查看日志。"
+          if [ -n "$existing_num" ]; then
+            gh issue comment "$existing_num" -R "${{ github.repository }}" -b "$body"
+          else
+            gh issue create -R "${{ github.repository }}" -t "$title" -b "$body"
+          fi

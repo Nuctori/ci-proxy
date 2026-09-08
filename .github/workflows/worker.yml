@@ -44,6 +44,7 @@ env:
 jobs:
   worker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.NPC_PAT }}
       AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
@@ -103,7 +104,8 @@ jobs:
               echo "$n" >> /tmp/exec_nums.txt
             fi
           done
-          exec_count="$(grep -c . /tmp/exec_nums.txt 2>/dev/null || echo 0)"
+          exec_count="$(grep -c . /tmp/exec_nums.txt 2>/dev/null || true)"
+          exec_count="${exec_count:-0}"
           prop_cap=6
           if [ "$exec_count" -gt 0 ]; then
             # 本场有执行任务时不再新增提案(专注交付)
@@ -231,7 +233,18 @@ jobs:
       - name: 交付(push dev + issue 回帖)
         if: steps.execute.outputs.num != '' && steps.detect.outputs.ahead != '0' && steps.build.conclusion != 'failure'
         run: |
-          git push origin "HEAD:$BRANCH_REF"
+          ok=0
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$BRANCH_REF"; then ok=1; break; fi
+            echo "push 冲突(attempt $attempt),rebase 后重试"
+            git fetch origin "$BRANCH_REF" 2>/dev/null || true
+            git rebase "origin/$BRANCH_REF" || { git rebase --abort; break; }
+            sleep 5
+          done
+          if [ "$ok" != "1" ]; then
+            gh issue comment "${{ steps.execute.outputs.num }}" --repo "$TARGET_REPO" -b "⚠️ push 重试 3 次失败(dev 分叉),本次改动**未交付**,请人工处理。<!-- npc-at -->"
+            exit 1
+          fi
           sha="$(git rev-parse --short HEAD)"
           check="docs 等非业务变更,跳过编译自检"
           [ "${{ steps.build.conclusion }}" = "success" ] && check="dotnet build 通过"
@@ -241,3 +254,19 @@ jobs:
       - name: 自检失败通知(不交付)
         if: steps.build.conclusion == 'failure'
         run: gh issue comment "${{ steps.execute.outputs.num }}" --repo "$TARGET_REPO" -b "⚠️ dotnet build 自检失败,本次改动**未交付**(未推送 dev)。详见 Actions 日志。<!-- npc-at -->"
+
+      - name: 失败告警(开/追评 issue)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.NPC_PAT }}
+        run: |
+          title="🚨 NPC 运行失败: ${{ github.workflow }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          stamp="$(date -u +%FT%TZ)"
+          existing_num="$(gh issue list -R "${{ github.repository }}" --state open --search "🚨 NPC 运行失败 in:title" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          body="${run_url} 于 ${stamp} 失败,请查看日志。"
+          if [ -n "$existing_num" ]; then
+            gh issue comment "$existing_num" -R "${{ github.repository }}" -b "$body"
+          else
+            gh issue create -R "${{ github.repository }}" -t "$title" -b "$body"
+          fi

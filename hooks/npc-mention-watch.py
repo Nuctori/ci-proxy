@@ -137,11 +137,32 @@ def poll_once(state):
             f"by @{c['user']['login']} (id={c['id']})",
             flush=True,
         )
-        try:
-            dispatch(CONFIG["watch_repo"], number, role, c["body"], c["user"]["login"])
-            print(f"[npc-watch] 已 dispatch → {CONFIG['npc_repo']}", flush=True)
-        except Exception as exc:  # noqa: BLE001 — 单次失败不终止守望
-            print(f"[npc-watch] dispatch 失败: {exc}", flush=True)
+        ok = False
+        for attempt in (1, 2):
+            try:
+                dispatch(CONFIG["watch_repo"], number, role, task, author)
+                print(
+                    f"[npc-watch] 已 dispatch → {CONFIG['npc_repo']} "
+                    f"(issue #{number}, attempt {attempt})",
+                    flush=True,
+                )
+                ok = True
+                break
+            except Exception as exc:  # noqa: BLE001
+                print(f"[npc-watch] dispatch 失败(attempt {attempt}): {exc}", flush=True)
+                if attempt == 1:
+                    time.sleep(5)
+        if not ok:
+            dead = CONFIG["state_file"].replace(".json", "-dead-letters.jsonl")
+            with open(dead, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {"id": c["id"], "number": number, "body": (c.get("body") or "")[:200]},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            print(f"[npc-watch] 两次失败,已记入死信: {dead}", flush=True)
         state["last_id"] = max(state["last_id"], c["id"])
         save_state(state)
     max_id = max((c["id"] for c in comments), default=last)

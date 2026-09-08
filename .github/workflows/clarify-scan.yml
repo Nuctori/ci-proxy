@@ -40,6 +40,7 @@ env:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.NPC_PAT }}
       AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
@@ -129,3 +130,19 @@ jobs:
             --tools read,bash,grep,find,ls \
             "$(cat /tmp/npc-clarify-batch-prompt.md)" 2>&1 | tee /tmp/clarify-scan.log
           echo "批量拆解完成,日志见 /tmp/clarify-scan.log"
+
+      - name: 失败告警(开/追评 issue)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.NPC_PAT }}
+        run: |
+          title="🚨 NPC 运行失败: ${{ github.workflow }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          stamp="$(date -u +%FT%TZ)"
+          existing_num="$(gh issue list -R "${{ github.repository }}" --state open --search "🚨 NPC 运行失败 in:title" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          body="${run_url} 于 ${stamp} 失败,请查看日志。"
+          if [ -n "$existing_num" ]; then
+            gh issue comment "$existing_num" -R "${{ github.repository }}" -b "$body"
+          else
+            gh issue create -R "${{ github.repository }}" -t "$title" -b "$body"
+          fi
