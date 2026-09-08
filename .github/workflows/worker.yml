@@ -185,9 +185,7 @@ jobs:
           plan_time="$(gh api "repos/$TARGET_REPO/issues/$NUM/comments?per_page=100" \
             --jq '[.[] | select(.body | contains("<!-- worker-plan -->"))] | sort_by(.created_at) | last | .created_at' 2>/dev/null || true)"
           [ -n "$plan_time" ] || { gh issue comment "$NUM" --repo "$TARGET_REPO" -b "未找到方案评论(<!-- worker-plan -->),拒绝执行。" || true; exit 1; }
-          auth="$(gh api "repos/$TARGET_REPO/issues/$NUM/comments?per_page=100" \
-            --jq --arg ptime "$plan_time" --arg bot "$BOT_LOGIN" \
-            '[.[] | select(.created_at > $ptime) | select(.user.login != $bot) | select(.body | test("授权|批准|同意执行|/worker-go"))] | length')"
+          auth="$(NPC_TARGET_REPO="$TARGET_REPO" NPC_NUM="$NUM" NPC_PLAN_TIME="$plan_time" NPC_BOT="$BOT_LOGIN" python -c "import json, os, subprocess; repo, num, plan_time, bot = (os.environ[k] for k in ('NPC_TARGET_REPO', 'NPC_NUM', 'NPC_PLAN_TIME', 'NPC_BOT')); out = subprocess.run(['gh', 'api', 'repos/' + repo + '/issues/' + num + '/comments?per_page=100'], capture_output=True, text=True); comments = json.loads(out.stdout); keys = ('授权', '批准', '同意执行', '/worker-go'); print(sum(1 for c in comments if c['created_at'] > plan_time and c['user']['login'] != bot and any(k in (c.get('body') or '') for k in keys)))")"
           [ "${auth:-0}" -gt 0 ] || { gh issue comment "$NUM" --repo "$TARGET_REPO" -b "方案已就绪,但未检测到授权评论(回复「授权执行」即开工)。" || true; exit 1; }
           export COMMAND_CODE_API_KEY="${AGENT_API_KEY:-$COMMAND_CODE_API_KEY}"
           git config user.name "zri-review-npc"
