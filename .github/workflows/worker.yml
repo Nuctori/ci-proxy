@@ -111,7 +111,11 @@ jobs:
           else
             head -n "$prop_cap" /tmp/plan_candidates.txt > /tmp/plan_nums.txt 2>/dev/null || : > /tmp/plan_nums.txt
           fi
-          echo "plan_count=$(grep -c . /tmp/plan_nums.txt 2>/dev/null || echo 0)" >> "$GITHUB_OUTPUT"
+          plan_count="$(grep -c . /tmp/plan_nums.txt 2>/dev/null || true)"
+          plan_count="${plan_count:-0}"
+          exec_count="$(grep -c . /tmp/exec_nums.txt 2>/dev/null || true)"
+          exec_count="${exec_count:-0}"
+          echo "plan_count=$plan_count" >> "$GITHUB_OUTPUT"
           echo "execute_count=$exec_count" >> "$GITHUB_OUTPUT"
           echo "执行队列: $(cat /tmp/exec_nums.txt | tr '\n' ' ')"
           echo "提案队列: $(cat /tmp/plan_nums.txt | tr '\n' ' ')"
@@ -171,7 +175,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ steps.route.outputs.mode }}" = "sweep" ]; then
-            exec_count="$(grep -c . /tmp/exec_nums.txt 2>/dev/null || echo 0)"
+            exec_count="$(grep -c . /tmp/exec_nums.txt 2>/dev/null || true)"
+            exec_count="${exec_count:-0}"
             [ "$exec_count" -gt 0 ] || { echo "无已授权任务,跳过执行阶段"; exit 0; }
           fi
           NUM="$(head -n 1 /tmp/exec_nums.txt)"
