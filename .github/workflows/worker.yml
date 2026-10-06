@@ -85,6 +85,13 @@ jobs:
           BOT_LOGIN: ${{ env.BOT_LOGIN }}
         run: |
           set -eu
+          # 未配置目标仓库(模板仓库/未初始化实例)则优雅跳过,避免每日巡检硬失败
+          if [ -z "$TARGET_REPO" ]; then
+            echo "NPC_TARGET_REPO 未配置,跳过巡检;配置 Variables 与 secrets 后每日巡检自动生效"
+            echo "plan_count=0" >> "$GITHUB_OUTPUT"
+            echo "execute_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           gh api "repos/$TARGET_REPO/issues?state=open&per_page=100" --paginate \
             --jq '.[] | select(.pull_request == null) | .number' > /tmp/open_nums.txt
           : > /tmp/plan_nums.txt;   : > /tmp/exec_nums.txt
